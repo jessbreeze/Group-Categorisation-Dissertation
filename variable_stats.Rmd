@@ -1,0 +1,162 @@
+---
+title: "Variable test"
+output: html_notebook
+---
+
+**Reading in the data**
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(lmerTest)
+library(readr)
+library(lme4)
+
+read_helper <- function(filename) { 
+  data <- read.csv(filename)
+  interaction.data <- subset(data,role=="Director"| role=="Matcher")
+  interaction.data
+}
+
+#reading in the data
+prolific.data.files <- list.files('C:/Users/Jess/Dropbox/JBreezeData/coded_data/coded_detailed/variable',pattern='*csv',full.names=TRUE)
+prolific.data.unsorted <- purrr::map_df(prolific.data.files,read_helper)
+#sort by group, trial number and role 
+prolific.data <- prolific.data.unsorted[order(prolific.data.unsorted$group_id,prolific.data.unsorted$trial,prolific.data.unsorted$role),]
+```
+
+```{r}
+#returns last production for worker_id for target_plant, where trial < max_trial_number
+get_productions <- function(data.frame, worker_id, plant, max_trial_number) {
+  partners_productions <- subset(data.frame,workerCode==worker_id & target_plant==plant & trial<max_trial_number & role =="Director")
+  
+  if (nrow(partners_productions)<1){
+    NA
+  }
+  else {
+    tail(partners_productions,1)$fast_coded
+  }
+}
+
+
+#returns last production for group_id for target_plant, where trial < max_trial_number where everyone on worker_id_list *is excluded* - this is a simple way of finding the last non-partner production. Note that we need to exclude multiple individuals (not just the partner but also the focal individual), otherwise this would treat someone matching themselves as a non-partner match
+get_productions_with_exclusion <- function(data.frame, group, excluded_worker_id_list, plant, max_trial_number) {
+  non_partner_productions <- subset(data.frame,group_id==group & !(workerCode %in% excluded_worker_id_list) & target_plant==plant & trial<max_trial_number & role =="Director")
+  
+  if (nrow(non_partner_productions)<1){
+    NA
+  }
+  else {
+    tail(non_partner_productions,1)$fast_coded
+  }
+}
+
+#to find partner previous productions, can simply retrieve partner ID from partner column
+prolific.data$partner_last_production <- mapply(function(id,plant,trial_n)
+                                              get_productions(prolific.data,id,plant,trial_n),
+                                            prolific.data$partner, 
+                                            prolific.data$target_plant, 
+                                            prolific.data$trial)
+
+#to find non-partner previous productions, can simply retrieve partner ID from partner column and then use the exclusions version
+prolific.data$nonpartner_last_production <- mapply(function(group,id1,id2,plant,trial_n)
+                                              get_productions_with_exclusion(prolific.data,group,c(id1,id2),plant,trial_n),
+                                            prolific.data$group, 
+                                            prolific.data$workerCode, #need to add self + partner to exclusion list to get non-partner 
+                                            prolific.data$partner, 
+                                            prolific.data$target_plant, 
+                                            prolific.data$trial)
+
+
+prolific.data$same_as_partner <- ifelse(prolific.data$fast_coded==prolific.data$partner_last_production,1,0)
+prolific.data$same_as_other_group_member <- ifelse(prolific.data$fast_coded==prolific.data$nonpartner_last_production,1,0)
+
+```
+
+**Interaction Success**
+
+Plotting Interaction Success
+
+```{r}
+prolific.data <- prolific.data[!is.na(prolific.data$variation),]
+group_scores_over_time <- prolific.data %>% group_by(condition, trial,variation) %>% subset(!is.na(interaction_success)) %>% summarise(group_mean = mean(interaction_success))
+
+succ_int_plot <- ggplot(group_scores_over_time, aes(x = trial, y = group_mean, color = variation)) +
+  geom_point(aes(color=variation)) +
+  geom_smooth(method = "lm", se=TRUE, alpha = .15, aes(fill = variation)) +
+  theme_minimal() + ggtitle("Proportion of Successful Interactions by Trial and Condition") +
+  ylab("Proportion of Successful Interactions") + xlab("Trial")+
+  facet_wrap(~condition, labeller = as_labeller(
+    c("1g" = "Group Condition",
+      "2g" = "Pair Condition")+
+      scale_color_discrete(name = "Cross-Pair Variation",
+                           breaks = c("6_10", "8_10"),
+                          labels = c("High Variable Interaction", "Low Variable Interaction"))
+  ))
+
+succ_int_plot
+```
+
+Modelling Interaction Success
+
+```{r}
+success_model <- glmer(interaction_success~trial*condition*variation + (1|target_plant)+(1|group_id)+(1|workerCode), data =subset(prolific.data, role = 'Director'), family ='binomial', control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e4)))
+
+summary(success_model)
+
+```
+
+**Convergence to Non-Partner Group Member**
+
+Plotting convergence to non-partner group member
+
+```{r}
+same_as_other_score <- prolific.data %>% group_by(condition,variation, trial) %>% subset(!is.na(same_as_other_group_member)) %>% summarise(group_mean = mean(same_as_other_group_member))
+
+ggplot(same_as_other_score, aes(x = trial, y = group_mean, color = variation)) +
+  geom_point(aes(color=variation)) +
+  geom_smooth(method = "lm", se=TRUE, alpha = .15, aes(fill = variation)) +
+  theme_minimal() + ggtitle("Convergence with Non-Pair Group Member by Trial and Condition") +
+  ylab("Convergence with non-pair group member") + xlab("Trial")+
+  facet_wrap(~condition, labeller = as_labeller(
+    c("1g" = "Group Condition",
+      "2g" = "Pair Condition")))+
+      scale_color_discrete(name = "Cross-Pair Variation",
+                           breaks = c("6_10", "8_10"),
+                          labels = c("High Variable Interaction", "Low Variable Interaction"))
+```
+
+Modelling convergence to non-partner group member
+
+```{r}
+same_as_other_model <- glmer(same_as_other_group_member~trial*condition*variation + (1|target_plant)+(1|group_id)+(1|workerCode), data =subset(prolific.data, role = 'Director'), family ='binomial', control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e4)))
+      
+summary(same_as_other_model)
+```
+
+**Convergence to Partner**
+
+Plotting convergence to partner
+
+```{r}
+same_as_partner_score <- prolific.data %>% group_by(condition,variation, trial) %>% subset(!is.na(same_as_partner)) %>% summarise(group_mean = mean(same_as_partner))
+
+ggplot(same_as_partner_score, aes(x = trial, y = group_mean, color = variation)) +
+  geom_point(aes(color=variation)) +
+  geom_smooth(method = "lm", se=TRUE, alpha = .15, aes(fill = variation)) +
+  theme_minimal() + ggtitle("Convergence with Partner by Trial and Condition") +
+  ylab("Convergence with Partner") + xlab("Trial")+
+  facet_wrap(~condition)+
+      scale_color_discrete(name = "Cross-Pair Variation",
+                           breaks = c("6_10", "8_10"),
+                          labels = c("High Variable Interaction", "Low Variable Interaction"))
+```
+
+Modelling convergence to partner.
+
+```{r}
+same_as_partner_model <- glmer(same_as_partner~trial*condition*variation + (1|target_plant)+(1|group_id)+(1|workerCode), data =subset(prolific.data, role = 'Director'), family ='binomial', control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e4)))
+      
+summary(same_as_partner_model)
+```

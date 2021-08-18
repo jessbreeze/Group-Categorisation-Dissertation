@@ -1,0 +1,224 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+**Reading in the Data**
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(lmerTest)
+library(readr)
+library(lme4)
+library(dplyr)
+
+read_helper <- function(filename) { 
+  data <- read.csv(filename)
+  interaction.data <- subset(data,role=="Director"| role=="Matcher")
+  interaction.data
+}
+
+
+#reading variable data
+variable.data.files <- list.files('C:/Users/Jess/Dropbox/JBreezeData/coded_data/coded_detailed/variable',pattern='*csv',full.names=TRUE)
+variable.data.unsorted <- purrr::map_df(variable.data.files,read_helper)
+#sort by group, trial number and role 
+variable.data <- variable.data.unsorted[order(variable.data.unsorted$group_id,variable.data.unsorted$trial,variable.data.unsorted$role),]
+
+
+#reading nonvariable data
+nonvariable.data.files <- list.files('C:/Users/Jess/Dropbox/JBreezeData/coded_data/coded_detailed/non_variable',pattern='*csv',full.names=TRUE)
+nonvariable.data.unsorted <- purrr::map_df(nonvariable.data.files,read_helper)
+#sort by group, trial number and role 
+nonvariable.data <- nonvariable.data.unsorted[order(nonvariable.data.unsorted$group_id,nonvariable.data.unsorted$trial,nonvariable.data.unsorted$role),]
+nonvariable.data <- nonvariable.data %>%
+  add_column(variation = NA, .after="condition") #adds a column for variation, so it matches the variable data. Fills it with NAs
+nonvariable.data$variation[is.na(nonvariable.data$variation)] = "10_10" #turns all the NAs into 10_10, as it was fully ingroup interaction
+```
+
+```{r}
+    #returns last production for worker_id for target_plant, where trial < max_trial_number
+    get_productions <- function(data.frame, worker_id, plant, max_trial_number) {
+      partners_productions <- subset(data.frame,workerCode==worker_id & target_plant==plant & trial<max_trial_number & role =="Director")
+      
+      if (nrow(partners_productions)<1){
+        NA
+      }
+      else {
+        tail(partners_productions,1)$fast_coded
+      }
+    }
+
+
+    #returns last production for group_id for target_plant, where trial < max_trial_number where everyone on worker_id_list *is excluded* - this is a simple way of finding the last non-partner production. Note that we need to exclude multiple individuals (not just the partner but also the focal individual), otherwise this would treat someone matching themselves as a non-partner match
+    get_productions_with_exclusion <- function(data.frame, group, excluded_worker_id_list, plant, max_trial_number) {
+      non_partner_productions <- subset(data.frame,group_id==group & !(workerCode %in% excluded_worker_id_list) & target_plant==plant & trial<max_trial_number & role =="Director")
+      
+      if (nrow(non_partner_productions)<1){
+        NA
+      }
+      else {
+        tail(non_partner_productions,1)$fast_coded
+      }
+    }
+
+    #to find partner previous productions, can simply retrieve partner ID from partner column
+    variable.data$partner_last_production <- mapply(function(id,plant,trial_n)
+                                                  get_productions(variable.data,id,plant,trial_n),
+                                                variable.data$partner, 
+                                                variable.data$target_plant, 
+                                                variable.data$trial)
+
+    #to find non-partner previous productions, can simply retrieve partner ID from partner column and then use the exclusions version
+    variable.data$nonpartner_last_production <- mapply(function(group,id1,id2,plant,trial_n)
+                                                  get_productions_with_exclusion(variable.data,group,c(id1,id2),plant,trial_n),
+                                                variable.data$group, 
+                                                variable.data$workerCode, #need to add self + partner to exclusion list to get non-partner 
+                                                variable.data$partner, 
+                                                variable.data$target_plant, 
+                                                variable.data$trial)
+
+
+    variable.data$same_as_partner <- ifelse(variable.data$fast_coded==variable.data$partner_last_production,1,0)
+    variable.data$same_as_other_group_member <- ifelse(variable.data$fast_coded==variable.data$nonpartner_last_production,1,0)
+```
+
+```{r}
+    #to find partner previous productions, can simply retrieve partner ID from partner column
+    nonvariable.data$partner_last_production <- mapply(function(id,plant,trial_n)
+                                                  get_productions(nonvariable.data,id,plant,trial_n),
+                                                nonvariable.data$partner, 
+                                                nonvariable.data$target_plant, 
+                                                nonvariable.data$trial)
+
+    #to find non-partner previous productions, can simply retrieve partner ID from partner column and then use the exclusions version
+    nonvariable.data$nonpartner_last_production <- mapply(function(group,id1,id2,plant,trial_n)
+                                                  get_productions_with_exclusion(nonvariable.data,group,c(id1,id2),plant,trial_n),
+                                                nonvariable.data$group, 
+                                                nonvariable.data$workerCode, #need to add self + partner to exclusion list to get non-partner 
+                                                nonvariable.data$partner, 
+                                                nonvariable.data$target_plant, 
+                                                nonvariable.data$trial)
+
+
+    nonvariable.data$same_as_partner <- ifelse(nonvariable.data$fast_coded==nonvariable.data$partner_last_production,1,0)
+    nonvariable.data$same_as_other_group_member <- ifelse(nonvariable.data$fast_coded==nonvariable.data$nonpartner_last_production,1,0)
+```
+
+```{r}
+#subsets only the information we need from the data frames, making it easier to combine them into one data frame (as the columns didn't match)
+
+variable.data <- variable.data %>%
+  select(workerCode, trial, condition, variation, group_id, interaction_success, same_as_partner,same_as_other_group_member, target_plant, fast_coded) 
+
+nonvariable.data <- nonvariable.data %>%
+  select(workerCode, trial, condition, variation, group_id, interaction_success, same_as_partner,same_as_other_group_member, target_plant, fast_coded)
+
+
+```
+
+```{r}
+#making new data frame with all the data in from both experiments
+all.data <- rbind(nonvariable.data, variable.data) #combines the 2 existing data frames
+all.data <- all.data[complete.cases(all.data$variation),] #removes any rogue NAs
+```
+
+**Interaction Success**
+
+Plotting interaction success
+
+```{r}
+#subsetting data
+group_scores_over_time <- all.data %>% group_by(condition, trial,variation) %>% subset(!is.na(interaction_success)) %>% summarise(group_mean = mean(interaction_success))
+
+#plotting interaction success over time for each condition and cross-pair variation level
+succ_int_plot <- ggplot(group_scores_over_time, aes(x = trial, y = group_mean, color = variation)) +
+  geom_point(aes(color=variation)) +
+  geom_smooth(method = "lm", se=TRUE, alpha = .15, aes(fill = variation)) +
+  theme_minimal() + ggtitle("Proportion of Successful Interactions by Trial and Condition") +
+  ylab("Proportion of Successful Interactions") + xlab("Trial")+
+  facet_wrap(~condition, labeller = as_labeller(
+    c("1g" = "Group Condition",
+      "2g" = "Pair Condition")+
+    scale_colour_discrete(name = "Variation",
+                        breaks = c("6_10", "8_10", "10_10"),
+                        labels = c("High Variable Interaction", "Low Variable Interaction", "No Variable Interaction"))
+  ))
+
+succ_int_plot
+```
+
+Modelling interaction success
+
+```{r}
+success_model <- glmer(interaction_success~trial*condition*variation + (1|target_plant)+(1|group_id)+(1|workerCode), data =subset(all.data, role = 'Director'), family ='binomial', control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e4)))
+
+summary(success_model)
+```
+
+**Convergence to Partner**
+
+Plotting Convergence to partner
+
+```{r}
+same_as_partner_score <- all.data %>% group_by(condition,variation, trial) %>% subset(!is.na(same_as_partner)) %>% summarise(group_mean = mean(same_as_partner))
+
+ggplot(same_as_partner_score, aes(x = trial, y = group_mean, color = variation)) +
+  geom_point(aes(color=variation)) +
+  geom_smooth(method = "lm", se=TRUE, alpha = .15, aes(fill = variation)) +
+  theme_minimal() + ggtitle("Convergence with Partner by Trial and Condition") +
+  ylab("Convergence with Partner") + xlab("Trial")+
+  facet_wrap(~condition)+
+  scale_colour_discrete(name = "Cross-Pair Variation",
+                      breaks = c("6_10", "8_10", "10_10"),
+                      labels = c("High Cross-Pair Interaction", "Low Cross-Pair Variation", "No Cross-Pair Variation"))
+```
+
+Modelling convergence to partner
+
+```{r}
+same_as_partner_model <- glmer(same_as_partner~trial*condition*variation + (1|target_plant)+(1|group_id)+(1|workerCode), data =subset(all.data, role = 'Director'), family ='binomial', control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e4)))
+      
+summary(same_as_partner_model)
+```
+
+**Convergence to Non-Partner Group Member**
+
+Plotting convergence to non-partner group member
+
+```{r}
+same_as_other_score <- all.data %>% group_by(condition,variation, trial) %>% subset(!is.na(same_as_other_group_member)) %>% summarise(group_mean = mean(same_as_other_group_member))
+
+ggplot(same_as_other_score, aes(x = trial, y = group_mean, color = variation)) +
+  geom_point(aes(color=variation)) +
+  geom_smooth(method = "lm", se=TRUE, alpha = .15, aes(fill = variation)) +
+  theme_minimal() + ggtitle("Same as Other Group Member by Trial and Condition") +
+  ylab("Proportion of Same as other group member") + xlab("Trial")+
+  facet_wrap(~condition, labeller = as_labeller(
+    c("1g" = "Group Condition",
+      "2g" = "Pair Condition")))+
+      scale_color_discrete(name = "Cross-Pair Variation",
+                           breaks = c("6_10", "8_10"),
+                          labels = c("High Variable Interaction", "Low Variable Interaction"))
+```
+
+Modelling convergence to non-partner group member
+
+```{r}
+same_as_other_model <- glmer(same_as_other_group_member~trial*condition*variation + (1|target_plant)+(1|group_id)+(1|workerCode), data =subset(all.data, role = 'Director'), family ='binomial', control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=1e4)))
+
+summary(same_as_other_model)
+```
+
+**Label Frequencies**
+
+Finding total frequencies of label use across Experiment 1 and 2.
+
+```{r}
+label_freq_incl_na <- table(all.data$fast_coded, useNA = "ifany")
+label_freq_incl_na
+label_freq_no_na <- table(all.data$fast_coded)
+label_freq_no_na
+```
